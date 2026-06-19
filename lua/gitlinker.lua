@@ -32,11 +32,8 @@ M.actions = require("gitlinker.actions")
 function M.setup(config)
   if config then
     opts.setup(config.opts)
-    M.hosts.callbacks = vim.tbl_deep_extend(
-      "force",
-      M.hosts.callbacks,
-      config.callbacks or {}
-    )
+    M.hosts.callbacks =
+      vim.tbl_deep_extend("force", M.hosts.callbacks, config.callbacks or {})
     mappings.set(config.mappings)
   else
     opts.setup()
@@ -71,23 +68,20 @@ local function get_buf_range_url_data(mode, user_opts)
     return nil
   end
 
-  local buf_path = buffer.get_relative_path()
   if
-    git.has_file_changed(buf_path, rev)
+    git.has_file_changed(buf_repo_path, rev)
     and (mode == "v" or user_opts.add_current_line_on_normal_mode)
   then
     vim.notify(
       string.format(
         "Computed Line numbers are probably wrong because '%s' has changes",
-        buf_path
+        buf_repo_path
       ),
       vim.log.levels.WARN
     )
   end
-  local range = buffer.get_range(
-    mode,
-    user_opts.add_current_line_on_normal_mode
-  )
+  local range =
+    buffer.get_range(mode, user_opts.add_current_line_on_normal_mode)
 
   return vim.tbl_extend("force", repo_url_data, {
     rev = rev,
@@ -137,9 +131,8 @@ end
 function M.get_repo_url(user_opts)
   user_opts = vim.tbl_deep_extend("force", opts.get(), user_opts or {})
 
-  local repo_url_data = git.get_repo_data(
-    git.get_branch_remote() or user_opts.remote
-  )
+  local repo_url_data =
+    git.get_repo_data(git.get_branch_remote() or user_opts.remote)
   if not repo_url_data then
     return nil
   end
