@@ -42,25 +42,25 @@ function M.setup(config)
 end
 
 local function get_buf_range_url_data(mode, user_opts)
-  local git_root = git.get_git_root()
-  if not git_root then
+  local repo = git.get_repo()
+  if not repo then
     vim.notify("Not in a git repository", vim.log.levels.ERROR)
     return nil
   end
   mode = mode or "n"
-  local remote = git.get_branch_remote() or user_opts.remote
-  local repo_url_data = git.get_repo_data(remote)
+  local remote = git.get_branch_remote(repo) or user_opts.remote
+  local repo_url_data = git.get_repo_data(remote, repo)
   if not repo_url_data then
     return nil
   end
 
-  local rev = git.get_closest_remote_compatible_rev(remote)
+  local rev = git.get_closest_remote_compatible_rev(remote, repo)
   if not rev then
     return nil
   end
 
-  local buf_repo_path = buffer.get_relative_path(git_root)
-  if not git.is_file_in_rev(buf_repo_path, rev) then
+  local buf_repo_path = buffer.get_relative_path(repo.root)
+  if not git.is_file_in_rev(buf_repo_path, rev, repo) then
     vim.notify(
       string.format("'%s' does not exist in remote '%s'", buf_repo_path, remote),
       vim.log.levels.ERROR
@@ -69,7 +69,7 @@ local function get_buf_range_url_data(mode, user_opts)
   end
 
   if
-    git.has_file_changed(buf_repo_path, rev)
+    git.has_file_changed(buf_repo_path, rev, repo)
     and (mode == "v" or user_opts.add_current_line_on_normal_mode)
   then
     vim.notify(
@@ -131,8 +131,14 @@ end
 function M.get_repo_url(user_opts)
   user_opts = vim.tbl_deep_extend("force", opts.get(), user_opts or {})
 
+  local repo = git.get_repo()
+  if not repo then
+    vim.notify("Not in a git repository", vim.log.levels.ERROR)
+    return nil
+  end
+
   local repo_url_data =
-    git.get_repo_data(git.get_branch_remote() or user_opts.remote)
+    git.get_repo_data(git.get_branch_remote(repo) or user_opts.remote, repo)
   if not repo_url_data then
     return nil
   end

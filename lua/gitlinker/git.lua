@@ -21,86 +21,120 @@ local function buffer_dir()
   return tostring(path:new(name):parent())
 end
 
+local repo_context_cache = {}
+
+local function get_repo_context()
+  local dir = buffer_dir()
+  local cached = repo_context_cache[dir]
+  if cached then
+    return cached
+  end
+
+  local output, code = command("jj", { "root" }, dir)
+  local jj_context
+  if code == 0 and output[1] then
+    local root = output[1]
+    local _, log_code = command(
+      "jj",
+      { "log", "--no-graph", "--revisions", "@", "--template", "commit_id" },
+      root
+    )
+    if log_code == 0 then
+      jj_context = { vcs = "jj", root = root }
+    end
+  end
+
+  output, code = command("git", { "rev-parse", "--show-toplevel" }, dir)
+  if code == 0 and output[1] then
+    local git_root = output[1]
+    local context = { vcs = "git", root = git_root }
+    if jj_context and #jj_context.root >= #git_root then
+      context = jj_context
+    end
+    repo_context_cache[dir] = context
+    return context
+  end
+
+  if jj_context then
+    repo_context_cache[dir] = jj_context
+    return jj_context
+  end
+
+  return nil
+end
+
 -- wrap the git command to do the right thing always
 local function git(args, cwd)
-  return command("git", args, cwd or M.get_git_root())
+  local context = get_repo_context()
+  return command("git", args, cwd or (context and context.root))
 end
 
 local function jj(args, cwd)
-  return command("jj", args, cwd or M.get_git_root())
+  local context = get_repo_context()
+  return command("jj", args, cwd or (context and context.root))
 end
 
-local function get_git_remotes()
-  return git({ "remote" })
+local function get_git_remotes(context)
+  return git({ "remote" }, context and context.root)
 end
 
-local function get_git_remote_uri(remote)
+local function get_git_remote_uri(remote, context)
   assert(remote, "remote cannot be nil")
-  return git({ "remote", "get-url", remote })[1]
+  return git({ "remote", "get-url", remote }, context and context.root)[1]
 end
 
-local function get_git_rev(revspec)
-  return git({ "rev-parse", revspec })[1]
+local function get_git_rev(revspec, context)
+  return git({ "rev-parse", revspec }, context and context.root)[1]
 end
 
-local function get_git_rev_name(revspec)
-  return git({ "rev-parse", "--abbrev-ref", revspec })[1]
+local function get_git_rev_name(revspec, context)
+  return git({ "rev-parse", "--abbrev-ref", revspec }, context and context.root)[1]
 end
 
-local function get_git_root()
-  return git({ "rev-parse", "--show-toplevel" }, buffer_dir())[1]
+local function get_git_root(context)
+  if context then
+    return context.root
+  end
+  context = get_repo_context()
+  return context and context.root
 end
 
-local function get_jj_root()
-  local output, code = command("jj", { "root" }, buffer_dir())
-  if code ~= 0 then
-    return nil
+local function is_jj_repo(context)
+  context = context or get_repo_context()
+  return context ~= nil and context.vcs == "jj"
+end
+
+local function get_jj_remotes(context)
+  if context and context.remotes then
+    return context.remotes
   end
 
-  local root = output[1]
-  local _, log_code = command(
-    "jj",
-    { "log", "--no-graph", "--revisions", "@", "--template", "commit_id" },
-    root
-  )
-  if log_code ~= 0 then
-    return nil
-  end
-  return root
-end
-
-local function is_jj_repo()
-  return get_jj_root() ~= nil
-end
-
-local function get_jj_remotes()
-  local output, code = jj({ "git", "remote", "list" })
+  local output, code = jj({ "git", "remote", "list" }, context and context.root)
   if code ~= 0 then
     return {}
   end
 
   local remotes = {}
+  local remote_uris = {}
   for _, line in ipairs(output) do
-    local remote = line:match("^(%S+)")
+    local remote, uri = line:match("^(%S+)%s+(.+)$")
     if remote then
       remotes[#remotes + 1] = remote
+      remote_uris[remote] = uri
     end
+  end
+  if context then
+    context.remotes = remotes
+    context.remote_uris = remote_uris
   end
   return remotes
 end
 
-local function get_jj_remote_uri(remote)
+local function get_jj_remote_uri(remote, context)
   assert(remote, "remote cannot be nil")
-  local output, code = jj({ "git", "remote", "list" })
-  if code ~= 0 then
-    return nil
-  end
-
-  for _, line in ipairs(output) do
-    local name, uri = line:match("^(%S+)%s+(.+)$")
-    if name == remote then
-      return uri
-    end
+  get_jj_remotes(context)
+  if context and context.remote_uris then
+    return context.remote_uris[remote]
   end
   return nil
 end
@@ -109,7 +143,7 @@ local function jj_quote(str)
   return '"' .. str:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
 end
 
-local function get_jj_rev(revset)
+local function get_jj_rev(revset, context)
   local output, code = jj({
     "log",
     "--no-graph",
@@ -117,23 +151,27 @@ local function get_jj_rev(revset)
     revset,
     "--template",
     'commit_id ++ "\n"',
-  })
+  }, context and context.root)
   if code ~= 0 then
     return nil
   end
   return output[1]
 end
 
-local function is_git_file_in_rev(file, revspec)
-  local _, code = git({ "cat-file", "-e", revspec .. ":" .. file })
+local function is_git_file_in_rev(file, revspec, context)
+  local _, code =
+    git({ "cat-file", "-e", revspec .. ":" .. file }, context and context.root)
   if code == 0 then
     return true
   end
   return false
 end
 
-local function is_jj_file_in_rev(file, revspec)
-  local output, code = jj({ "file", "list", "--revision", revspec, "--", file })
+local function is_jj_file_in_rev(file, revspec, context)
+  local output, code = jj(
+    { "file", "list", "--revision", revspec, "--", file },
+    context and context.root
+  )
   if code ~= 0 then
     return false
   end
@@ -145,40 +183,45 @@ local function is_jj_file_in_rev(file, revspec)
   return false
 end
 
-function M.is_file_in_rev(file, revspec)
-  if is_jj_repo() then
-    return is_jj_file_in_rev(file, revspec)
+function M.is_file_in_rev(file, revspec, context)
+  if is_jj_repo(context) then
+    return is_jj_file_in_rev(file, revspec, context)
   end
 
-  if is_git_file_in_rev(file, revspec) then
+  if is_git_file_in_rev(file, revspec, context) then
     return true
   end
   return false
 end
 
-local function has_git_file_changed(file, rev)
-  if git({ "diff", rev, "--", file })[1] then
+local function has_git_file_changed(file, rev, context)
+  if git({ "diff", rev, "--", file }, context and context.root)[1] then
     return true
   end
   return false
 end
 
-local function has_jj_file_changed(file, rev)
-  return jj({ "diff", "--from", rev, "--to", "@", "--name-only", "--", file })[1]
-    ~= nil
+local function has_jj_file_changed(file, rev, context)
+  return jj(
+    { "diff", "--from", rev, "--to", "@", "--name-only", "--", file },
+    context and context.root
+  )[1] ~= nil
 end
 
-function M.has_file_changed(file, rev)
-  if is_jj_repo() then
-    return has_jj_file_changed(file, rev)
+function M.has_file_changed(file, rev, context)
+  if is_jj_repo(context) then
+    return has_jj_file_changed(file, rev, context)
   end
 
-  return has_git_file_changed(file, rev)
+  return has_git_file_changed(file, rev, context)
 end
 
-local function is_git_rev_in_remote(revspec, remote)
+local function is_git_rev_in_remote(revspec, remote, context)
   assert(remote, "remote cannot be nil")
-  local output = git({ "branch", "--remotes", "--contains", revspec })
+  local output = git(
+    { "branch", "--remotes", "--contains", revspec },
+    context and context.root
+  )
   for _, rbranch in ipairs(output) do
     if rbranch:match(remote) then
       return true
@@ -291,16 +334,16 @@ local function parse_uri(uri, errs)
   return { host = host, port = port, repo = repo_path }
 end
 
-local function get_git_closest_remote_compatible_rev(remote)
+local function get_git_closest_remote_compatible_rev(remote, context)
   -- try upstream branch HEAD (a.k.a @{u})
-  local upstream_rev = get_git_rev("@{u}")
+  local upstream_rev = get_git_rev("@{u}", context)
   if upstream_rev then
     return upstream_rev
   end
 
   -- try HEAD
-  if is_git_rev_in_remote("HEAD", remote) then
-    local head_rev = get_git_rev("HEAD")
+  if is_git_rev_in_remote("HEAD", remote, context) then
+    local head_rev = get_git_rev("HEAD", context)
     if head_rev then
       return head_rev
     end
@@ -309,8 +352,8 @@ local function get_git_closest_remote_compatible_rev(remote)
   -- try last 50 parent commits
   for i = 1, 50 do
     local revspec = "HEAD~" .. i
-    if is_git_rev_in_remote(revspec, remote) then
-      local rev = get_git_rev(revspec)
+    if is_git_rev_in_remote(revspec, remote, context) then
+      local rev = get_git_rev(revspec, context)
       if rev then
         return rev
       end
@@ -318,7 +361,7 @@ local function get_git_closest_remote_compatible_rev(remote)
   end
 
   -- try remote HEAD
-  local remote_rev = get_git_rev(remote)
+  local remote_rev = get_git_rev(remote, context)
   if remote_rev then
     return remote_rev
   end
@@ -333,14 +376,16 @@ local function get_git_closest_remote_compatible_rev(remote)
   return nil
 end
 
-local function get_jj_closest_remote_compatible_rev(remote)
+local function get_jj_closest_remote_compatible_rev(remote, context)
   local remote_bookmarks = "remote_bookmarks(remote=" .. jj_quote(remote) .. ")"
-  local ancestor = get_jj_rev("latest(::@ & " .. remote_bookmarks .. ", 1)")
+  local ancestor =
+    get_jj_rev("latest(heads(::@ & " .. remote_bookmarks .. "), 1)", context)
   if ancestor then
     return ancestor
   end
 
-  local remote_rev = get_jj_rev("latest(" .. remote_bookmarks .. ", 1)")
+  local remote_rev =
+    get_jj_rev("latest(" .. remote_bookmarks .. ", 1)", context)
   if remote_rev then
     return remote_rev
   end
@@ -355,23 +400,23 @@ local function get_jj_closest_remote_compatible_rev(remote)
   return nil
 end
 
-function M.get_closest_remote_compatible_rev(remote)
-  if is_jj_repo() then
-    return get_jj_closest_remote_compatible_rev(remote)
+function M.get_closest_remote_compatible_rev(remote, context)
+  if is_jj_repo(context) then
+    return get_jj_closest_remote_compatible_rev(remote, context)
   end
 
-  return get_git_closest_remote_compatible_rev(remote)
+  return get_git_closest_remote_compatible_rev(remote, context)
 end
 
-function M.get_repo_data(remote)
+function M.get_repo_data(remote, context)
   local errs = {
     string.format("Failed to retrieve repo data for remote '%s'", remote),
   }
   local remote_uri
-  if is_jj_repo() then
-    remote_uri = get_jj_remote_uri(remote)
+  if is_jj_repo(context) then
+    remote_uri = get_jj_remote_uri(remote, context)
   else
-    remote_uri = get_git_remote_uri(remote)
+    remote_uri = get_git_remote_uri(remote, context)
   end
   if not remote_uri then
     table.insert(
@@ -389,11 +434,11 @@ function M.get_repo_data(remote)
 end
 
 function M.get_git_root()
-  return get_jj_root() or get_git_root()
+  return get_git_root()
 end
 
-local function get_git_branch_remote()
-  local remotes = get_git_remotes()
+local function get_git_branch_remote(context)
+  local remotes = get_git_remotes(context)
   if #remotes == 0 then
     vim.notify("Git repo has no remote", vim.log.levels.ERROR)
     return nil
@@ -402,7 +447,7 @@ local function get_git_branch_remote()
     return remotes[1]
   end
 
-  local upstream_branch = get_git_rev_name("@{u}")
+  local upstream_branch = get_git_rev_name("@{u}", context)
   if not upstream_branch then
     return nil
   end
@@ -434,8 +479,8 @@ local function get_git_branch_remote()
   return nil
 end
 
-local function get_jj_branch_remote()
-  local remotes = get_jj_remotes()
+local function get_jj_branch_remote(context)
+  local remotes = get_jj_remotes(context)
   if #remotes == 0 then
     vim.notify("JJ repo has no remote", vim.log.levels.ERROR)
     return nil
@@ -447,12 +492,16 @@ local function get_jj_branch_remote()
   return nil
 end
 
-function M.get_branch_remote()
-  if is_jj_repo() then
-    return get_jj_branch_remote()
+function M.get_branch_remote(context)
+  if is_jj_repo(context) then
+    return get_jj_branch_remote(context)
   end
 
-  return get_git_branch_remote()
+  return get_git_branch_remote(context)
+end
+
+function M.get_repo()
+  return get_repo_context()
 end
 
 return M
